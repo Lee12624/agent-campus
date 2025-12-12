@@ -1,13 +1,21 @@
 ### Custom ###
 application-local.yml
 
+### Frontend ###
+agent-ga-frontend-zjku/node_modules/
+agent-ga-frontend-zjku/dist/
+agent-ga-frontend-zjku/.vite/
+*.log
+.DS_Store
 
+### Backend ###
 HELP.md
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### IDE ###
 ### STS ###
 .apt_generated
 .classpath
