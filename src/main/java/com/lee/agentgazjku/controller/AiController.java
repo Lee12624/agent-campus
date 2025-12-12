@@ -1,0 +1,236 @@
+package com.lee.agentgazjku.controller;
+
+
+import com.lee.agentgazjku.app.CampusApp;
+import com.lee.agentgazjku.chatmemory.MysqlBasedChatMemory;
+import com.lee.agentgazjku.controller.dto.ChatHistoryResponse;
+import com.lee.agentgazjku.controller.dto.ConversationListItem;
+import com.lee.agentgazjku.controller.dto.MessageDTO;
+import jakarta.annotation.Resource;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/ai")
+public class AiController {
+
+    @Resource
+    private CampusApp campusApp;
+
+    @Resource
+    private ToolCallback[] toolCallbacks;
+
+    @Resource
+    private ChatModel dashscopeChatModel;
+
+
+    @Resource(name = "mysqlChatMemory")
+    private MysqlBasedChatMemory mysqlChatMemory;
+
+
+    /**
+     * 执行流式对话，与校园学姐进行互动，返回校园学姐的回复内容流
+     * @param userMessage 用户消息
+     * @param chatId 对话ID，用于区分不同的对话会话
+     * @return 校园学姐的回复内容流
+     */
+
+    @GetMapping(value = "/campus_app/chat/rag/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> doChatWithVectorStoreStream(String userMessage, String chatId) {
+        return campusApp.doChatWithVectorStoreStream(userMessage, chatId)
+                .map(content -> "data: " + content + "\n\n") // 标准化SSE格式
+                .concatWith(Flux.just("data: [DONE]\n\n")) // 添加结束标记
+                .onErrorResume(e -> Flux.just("data: 服务异常：" + e.getMessage() + "\n\n"));
+    }
+
+
+    /**
+     * 使用工具进行对话，返回一个包含工具调用结果的字符串流
+     * 该方法会根据用户输入的问题，调用注册的工具，并返回一个包含工具调用结果的字符串流
+     * @param userMessage 用户消息
+     * @param chatId 对话ID，用于区分不同的对话会话
+     * @return 工具调用结果的字符串流
+     */
+    @GetMapping(value = "/campus_app/chat/tool/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> doChatWithToolStream(String userMessage, String chatId) {
+        return campusApp.doChatWithToolStream(userMessage, chatId)
+                .map(content -> "data: " + content + "\n\n") // 标准化SSE格式
+                .concatWith(Flux.just("data: [DONE]\n\n")) // 添加结束标记
+                .onErrorResume(e -> Flux.just("data: 服务异常：" + e.getMessage() + "\n\n"));
+    }
+
+
+    // ==================== 历史对话管理接口 ====================
+
+    /**
+     * 获取所有对话列表
+     * @return 对话列表
+     */
+    @GetMapping("/chat/history/database/list")
+    public ResponseEntity<List<ConversationListItem>> getConversationList() {
+        try {
+            List<Map<String, Object>> rawList = mysqlChatMemory.getConversationList();
+            List<ConversationListItem> conversationList = rawList.stream()
+                    .map(item -> new ConversationListItem(
+                            (String) item.get("conversationId"),
+                            (String) item.get("lastUserMessagePreview"),
+                            (Long) item.get("lastMessageTimestamp"),
+                            (Integer) item.get("messageCount")
+                    ))
+                    .collect(Collectors.toList());
+            return ResponseEntity.ok(conversationList);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * 获取基于数据库的历史对话
+     * @param conversationId 对话ID
+     * @return 历史对话列表
+     */
+    @GetMapping("/chat/history/database")
+    public ResponseEntity<ChatHistoryResponse> getDatabaseHistory(@RequestParam String conversationId) {
+        try {
+            List<Map<String, Object>> rawMessages = mysqlChatMemory.getMessagesWithTimestamp(conversationId);
+            List<MessageDTO> messageDTOs = rawMessages.stream()
+                    .map(item -> {
+                        MessageDTO dto = new MessageDTO();
+                        dto.setContent((String) item.get("content"));
+                        dto.setMessageType((String) item.get("messageType"));
+                        dto.setTimestamp((Long) item.get("timestamp"));
+                        return dto;
+                    })
+                    .collect(Collectors.toList());
+            ChatHistoryResponse response = new ChatHistoryResponse(conversationId, messageDTOs, messageDTOs.size());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+
+    /**
+     * 添加消息到基于数据库的历史对话
+     * @param conversationId 对话ID
+     * @param messageDTO 消息DTO
+     * @return 操作结果
+     */
+    @PostMapping("/chat/history/database/add")
+    public ResponseEntity<Map<String, Object>> addDatabaseMessage(
+            @RequestParam String conversationId,
+            @RequestBody MessageDTO messageDTO) {
+        try {
+            Message message = convertToMessage(messageDTO);
+            // 使用前端传递的时间戳，如果没有则使用当前时间
+            long timestamp = messageDTO.getTimestamp() != null ? messageDTO.getTimestamp() : System.currentTimeMillis();
+            ((MysqlBasedChatMemory) mysqlChatMemory).addWithTimestamp(conversationId, message, timestamp);
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("message", "消息添加成功");
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("message", "消息添加失败: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+        }
+    }
+
+
+    /**
+     * 清除基于数据库的历史对话
+     * @param conversationId 对话ID
+     * @return 操作结果
+     */
+        @DeleteMapping("/chat/history/database")
+    public ResponseEntity<Map<String, Object>> clearDatabaseHistory(@RequestParam String conversationId) {
+        try {
+            mysqlChatMemory.clear(conversationId);
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("message", "历史对话清除成功");
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("message", "历史对话清除失败: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+        }
+    }
+
+    /**
+     * 清除所有基于数据库的历史对话
+     * @return 操作结果
+     */
+    @DeleteMapping("/chat/history/database/clearAll")
+    public ResponseEntity<Map<String, Object>> clearAllDatabaseHistory() {
+        try {
+            mysqlChatMemory.clearAll();
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("message", "所有历史对话清除成功");
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("message", "清除所有历史对话失败: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+        }
+    }
+
+    /**
+     * 将Message列表转换为MessageDTO列表
+     */
+    private List<MessageDTO> convertToDTOs(List<Message> messages) {
+        return messages.stream()
+                .map(msg -> {
+                    MessageDTO dto = new MessageDTO();
+                    dto.setContent(msg.getText());
+                    // 根据消息类型设置messageType
+                    if (msg instanceof UserMessage) {
+                        dto.setMessageType("USER");
+                    } else if (msg instanceof AssistantMessage) {
+                        dto.setMessageType("ASSISTANT");
+                    } else if (msg instanceof SystemMessage) {
+                        dto.setMessageType("SYSTEM");
+                    } else {
+                        dto.setMessageType("UNKNOWN");
+                    }
+                    return dto;
+                })
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 将MessageDTO转换为Message对象
+     */
+    private Message convertToMessage(MessageDTO dto) {
+        String content = dto.getContent();
+        String messageType = dto.getMessageType() != null ? dto.getMessageType().toUpperCase() : "USER";
+
+        return switch (messageType) {
+            case "USER" -> new UserMessage(content);
+            case "ASSISTANT" -> new AssistantMessage(content);
+            case "SYSTEM" -> new SystemMessage(content);
+            default -> new UserMessage(content);
+        };
+    }
+
+
+
+}

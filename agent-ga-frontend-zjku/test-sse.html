@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE测试页面</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: red;
+        }
+        .success {
+            color: green;
+        }
+    </style>
+</head>
+<body>
+    <h1>SSE连接测试</h1>
+
+    <div class="test-section">
+        <h3>普通模式测试</h3>
+        <input type="text" id="normalMessage" placeholder="输入测试消息" value="你好，请介绍一下张家口学院">
+        <button onclick="testNormalMode()">测试普通模式</button>
+    </div>
+
+    <div class="test-section">
+        <h3>高级模式测试</h3>
+        <input type="text" id="advancedMessage" placeholder="输入测试消息" value="你好，请介绍一下张家口学院">
+        <button onclick="testAdvancedMode()">测试高级模式</button>
+    </div>
+
+    <div class="test-section">
+        <h3>结果</h3>
+        <div id="result"></div>
+        <button onclick="clearResult()">清空结果</button>
+    </div>
+
+    <script>
+        let eventSource = null;
+
+        function log(message, type = 'info') {
+            const result = document.getElementById('result');
+            const timestamp = new Date().toLocaleTimeString();
+            const className = type === 'error' ? 'error' : type === 'success' ? 'success' : '';
+            result.innerHTML += `[${timestamp}] <span class="${className}">${message}</span>\n`;
+            result.scrollTop = result.scrollHeight;
+        }
+
+        function testNormalMode() {
+            const message = document.getElementById('normalMessage').value;
+            testSSE('normal', message);
+        }
+
+        function testAdvancedMode() {
+            const message = document.getElementById('advancedMessage').value;
+            testSSE('advanced', message);
+        }
+
+        function testSSE(mode, message) {
+            // 关闭之前的连接
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            const chatId = Date.now().toString();
+            const endpoint = mode === 'advanced'
+                ? `/api/ai/campus_app/chat/tool/stream`
+                : `/api/ai/campus_app/chat/rag/stream`;
+
+            const url = `${endpoint}?userMessage=${encodeURIComponent(message)}&chatId=${chatId}`;
+
+            log(`开始${mode === 'advanced' ? '高级' : '普通'}模式测试...`);
+            log(`请求URL: ${url}`);
+
+            eventSource = new EventSource(url);
+
+            eventSource.onopen = function() {
+                log('SSE连接已建立', 'success');
+            };
+
+            eventSource.onclose = function() {
+                log('SSE连接已关闭', 'info');
+            };
+
+            let streamCompleted = false;
+
+            eventSource.onmessage = function(event) {
+                const rawData = event.data.trim();
+                // 去除SSE格式前缀 "data: "
+                const data = rawData.startsWith('data: ') ? rawData.substring(6) : rawData;
+                log(`收到数据: "${data}" (原始: "${rawData}")`);
+
+                if (data === '' || data === '[DONE]') {
+                    log('SSE流正常结束', 'success');
+                    streamCompleted = true;
+                    eventSource.close();
+                    return;
+                }
+
+                if (data.includes('服务异常')) {
+                    log(`服务错误: ${data}`, 'error');
+                    streamCompleted = true;
+                    eventSource.close();
+                    return;
+                }
+            };
+
+            eventSource.onerror = function(error) {
+                if (streamCompleted) {
+                    log('SSE连接正常关闭（流已完成）', 'success');
+                    return;
+                }
+                log(`SSE连接错误: ${error}`, 'error');
+                eventSource.close();
+            };
+        }
+
+        function clearResult() {
+            document.getElementById('result').innerHTML = '';
+        }
+
+        // 页面加载时的提示
+        window.onload = function() {
+            log('SSE测试页面已加载。请确保后端服务运行在 http://localhost:8123');
+        };
+    </script>
+</body>
+</html>

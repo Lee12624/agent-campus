@@ -1,0 +1,52 @@
+# spring
+spring:
+  application:
+    name: agent-ga-zjku
+  datasource:
+    url: jdbc:mysql://localhost:3306/tmp?useSSL=false&serverTimezone=UTC
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+
+
+  #spring ai
+  ai:
+    dashscope:
+      api-key: sk-11aada78710a4c48ab92f24a7c05ed8b
+      model: qwen3-max
+      result-format: message
+      temperature: 0.7
+      embedding:
+        model: text-embedding-v2
+    # mcp?????
+  #  mcp:
+  #   client:
+  #     stdio:
+  #       servers-configuration: classpath:mcp-servers.json
+server:
+  port: 8123
+  # servlet
+  servlet:
+    context-path: /api
+
+# springdoc-openapi
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.lee.leeaiagent.controller
+# knife4j
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+search-api:
+  api-key: FhiXbpGMigLwUWnyZ9dEyZSV
