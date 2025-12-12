@@ -4,16 +4,19 @@ spring:
     name: agent-ga-zjku
   datasource:
     url: jdbc:mysql://localhost:3306/tmp?useSSL=false&serverTimezone=UTC
-    username: root
-    password: 123456
+    username: our-username
+    password: your-password
     driver-class-name: com.mysql.cj.jdbc.Driver
 
+  # 环境配置
+  profiles:
+    active: local
 
 
   #spring ai
   ai:
     dashscope:
-      api-key: sk-11aada78710a4c48ab92f24a7c05ed8b
+      api-key: your-dashscope-api-key
       model: qwen3-max
       result-format: message
       temperature: 0.7
@@ -49,4 +52,4 @@ knife4j:
     language: zh_cn
 
 search-api:
-  api-key: FhiXbpGMigLwUWnyZ9dEyZSV
+  api-key: your-search-api-key
