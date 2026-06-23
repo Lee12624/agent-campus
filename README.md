@@ -44,7 +44,7 @@
 ### 2. 克隆项目
 
 ```bash
-git clone https://github.com/Lee12624/agent-ga-zjku.git
+git clone https://github.com/Lee12624/agent-campus.git
 cd agent-ga-zjku
 ```
 
