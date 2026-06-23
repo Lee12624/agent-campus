@@ -14,6 +14,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +23,13 @@ import reactor.core.publisher.Flux;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -295,6 +303,63 @@ public class AiController {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    @GetMapping("/download/pdf")
+    public ResponseEntity<byte[]> downloadPdf(@RequestParam String fileName) {
+        try {
+            log.info("收到PDF下载请求，原始文件名：{}", fileName);
+            
+            // 从UUID文件名中提取UUID
+            String uuid = fileName == null ? "" : fileName.trim().replace(".pdf", "");
+            log.info("提取的UUID：{}", uuid);
+            
+            // 查找原文件名用于显示
+            String displayFileName = com.lee.agentgazjku.tools.PDFGenerationTool.getDisplayName(uuid);
+            if (displayFileName == null || displayFileName.isBlank()) {
+                displayFileName = "document.pdf";
+            }
+            log.info("显示用的文件名：{}", displayFileName);
+            
+            String filePath = System.getProperty("user.dir") + "/tmp/pdf/" + fileName;
+            log.info("PDF文件路径：{}", filePath);
+            
+            Path path = Paths.get(filePath);
+            
+            if (!Files.exists(path)) {
+                log.warn("PDF文件不存在：{}", filePath);
+                return ResponseEntity.notFound().build();
+            }
+            
+            log.info("PDF文件存在，开始读取，文件大小：{} bytes", Files.size(path));
+            byte[] pdfBytes = Files.readAllBytes(path);
+            log.info("PDF文件读取成功，字节数：{}", pdfBytes.length);
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_PDF);
+            headers.setContentDispositionFormData("attachment", java.net.URLEncoder.encode(displayFileName, "UTF-8"));
+            headers.setContentLength(pdfBytes.length);
+            
+            log.info("准备返回PDF文件：{}", displayFileName);
+            return new ResponseEntity<>(pdfBytes, headers, HttpStatus.OK);
+        } catch (IOException e) {
+            log.error("下载PDF失败: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    private static String sanitizeFileName(String fileName) {
+        if (fileName == null || fileName.isBlank()) {
+            return "export.pdf";
+        }
+        String base = new File(fileName.trim()).getName();
+        if (base.isEmpty() || ".".equals(base)) {
+            base = "export.pdf";
+        }
+        if (!base.toLowerCase().endsWith(".pdf")) {
+            base = base + ".pdf";
+        }
+        return base.replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 
 }

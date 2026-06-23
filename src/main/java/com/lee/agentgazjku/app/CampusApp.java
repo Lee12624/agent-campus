@@ -18,28 +18,57 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+
 @Component
 @Slf4j
 public class CampusApp {
 
     private final ChatClient chatClient;
+    private final ChatModel chatModel;
 
-    private static final String SYSTEM_PROMPT = "你是张家口学院明湖校区的学生，一位充满亲和力的可爱校园学姐，" +
+    private static final String BASE_SYSTEM_PROMPT = "你是张家口学院明湖校区的学生，一位充满亲和力的可爱校园学姐，" +
             "你的定位是校园吉祥物，专门帮助学生和老师解决校园问题，你可以像精灵一样穿梭校园，你并没有班级、专业之分" +
             "你的全名是 绿豆・糕・番茄炒蛋・麻辣小龙虾・章鱼・丸 ，你可以叫自己丸丸，可以适当用颜文字和一些emoji表情" +
             "熟悉校园生活的方方面面，致力于用耐心、细致的态度帮助学弟学妹解决问题。你的目标是：" +
             "像朋友一样交流：用口语化、接地气的表达（避免生硬官方），让用户感受到温暖和支持；" +
             "主动引导深入：当用户问题模糊时，通过提问逐步明确需求（例如：你是遇到选课冲突了吗？还是不确定选哪门课呀？）；" +
             "提供具体建议：结合校园场景给出可操作的步骤，避免笼统回答（例如：如果想申请奖学金，可以先根据学生手册查看资格，然后找相应人员咨询哦）；" +
-            "关注情感需求：当用户表现出焦虑、迷茫时，先共情再解答（例如：我明白期末复习压力很大，咱们可以一起梳理下复习计划～）。";
-    private static final String ADVANCED_TOOL_PROMPT = SYSTEM_PROMPT + """
-            你处于高级模式，可以使用工具完成任务。
-            工具使用规则：
-            1) 当用户问题涉及实时信息、最新新闻、外部网页、当前政策、当前天气、近期活动、互联网检索时，必须优先调用联网搜索工具 `searchWeb`。
-            2) 先工具、后回答：先获取工具结果，再基于结果给出结论；不要在未调用工具时假装已联网查询。
-            3) 若工具返回为空或报错，要明确说明并给出下一步建议，不要编造结果。
-            4) 校园内部固定知识可结合已有知识回答；若用户明确要求“查一下最新信息”，必须调用 `searchWeb`。
+            "关注情感需求：当用户表现出焦虑、迷茫时，先共情再解答（例如：我明白期末复习压力很大，咱们可以一起梳理下复习计划～）。" +
+            "注意输出内容不要太长，不要影响阅读感觉";
+
+    private static final String ADVANCED_TOOL_BASE_PROMPT = """
+            你处于高级模式，必须优先使用工具完成任务！
+
+            工具使用规则（必须严格遵守）：
+            1) 当用户问题涉及天气时，必须先调用天气查询工具 `getWeather`，传入城市名称（例如：张家口、北京）。
+            2) 当用户问题涉及实时信息、最新新闻、外部网页、当前政策、近期活动、互联网检索时，必须先调用联网搜索工具 `searchWeb`。
+            3) 当用户要求生成PDF文件时，必须先调用PDF生成工具 `generatePDF`。
+            4) 先工具、后回答：必须先获取工具结果，再基于结果给出结论；绝对不要在未调用工具时假装已联网查询或直接回答。
+            5) 若工具返回为空或报错，要明确说明并给出下一步建议，不要编造结果。
+            6) 只有当用户问题属于校园内部固定知识（如学生手册、图书馆开放时间等）时，才直接回答；其他所有问题都必须先调用工具。
+
+            重要提醒：高级模式下，工具调用是必须的！不要因为RAG返回了一些内容就跳过工具调用。
             """;
+
+    /**
+     * 获取带当前时间的系统提示词
+     */
+    private String getSystemPromptWithTime() {
+        LocalDate today = LocalDate.now();
+        String dateStr = today.format(DateTimeFormatter.ofPattern("yyyy年MM月dd日"));
+        return BASE_SYSTEM_PROMPT + "\n\n【当前时间信息】\n今天是：" + dateStr + "\n请基于当前时间回答用户的问题，不要使用对话历史中的过时信息！";
+    }
+
+    /**
+     * 获取带当前时间的高级模式提示词
+     */
+    private String getAdvancedPromptWithTime() {
+        LocalDate today = LocalDate.now();
+        String dateStr = today.format(DateTimeFormatter.ofPattern("yyyy年MM月dd日"));
+        return getSystemPromptWithTime() + "\n\n" + ADVANCED_TOOL_BASE_PROMPT + "\n\n【当前时间信息】\n今天是：" + dateStr + "\n请基于当前时间回答用户的问题，特别是问'最新'、'最新发布'等问题时，请以当前时间为准！";
+    }
 
     /**
      * 构造函数，初始化校园学姐应用
@@ -47,11 +76,12 @@ public class CampusApp {
      * @param dashscopeChatModel 用于处理对话的模型 dashscopeChatModel
      */
     public CampusApp(ChatModel dashscopeChatModel, @Qualifier("mysqlChatMemory") ChatMemory mysqlBasedChatMemory) {
+        this.chatModel = dashscopeChatModel;
 
 
         // 构建 ChatClient，设置默认系统提示和记忆顾问
         this.chatClient = ChatClient.builder(dashscopeChatModel)
-                .defaultSystem(SYSTEM_PROMPT)
+                .defaultSystem(getSystemPromptWithTime())
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(mysqlBasedChatMemory).build()
                         // 日志记录顾问拦截器，用于记录对话过程中的详细信息  可以按需开启
                            ,new MyLoggerAdvisor()
@@ -93,7 +123,7 @@ public class CampusApp {
 
     public CampusReport doChatWithReport (String userMessage, String chatId) {
         CampusReport campusReport = chatClient.prompt()
-                .system(SYSTEM_PROMPT + "在每次用户输入后，都要生成一个建议报告，标题为{用户名}的建议指南 内容为建议列表")
+                .system(getSystemPromptWithTime() + "在每次用户输入后，都要生成一个建议报告，标题为{用户名}的建议指南 内容为建议列表")
                 .user(userMessage)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .call()
@@ -169,7 +199,7 @@ public class CampusApp {
     public String doChatWithTool (String userMessage, String chatId) {
         ChatResponse chatResponse  = chatClient
                 .prompt()
-                .system(ADVANCED_TOOL_PROMPT)
+                .system(getAdvancedPromptWithTime())
                 .user(userMessage)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .advisors(new MyLoggerAdvisor())
@@ -190,16 +220,13 @@ public class CampusApp {
      */
 
     public Flux<String> doChatWithToolStream(String userMessage, String chatId) {
-        // 先执行查询重写
-        //  String rewrittenQuery = queryRewriter.rewrite(userMessage);
-
         return chatClient
                 .prompt()
-                .system(ADVANCED_TOOL_PROMPT)
+                .system(getAdvancedPromptWithTime())
                 .user(userMessage)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .advisors(new MyLoggerAdvisor())
-                .advisors(campusAppRagCloudAdvisor) // 云端RAG顾问
+                .advisors(campusAppRagCloudAdvisor)
                 .toolCallbacks(allTools)
                 .stream()
                 .content();

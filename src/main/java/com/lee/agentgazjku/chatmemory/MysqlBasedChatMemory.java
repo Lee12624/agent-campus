@@ -28,6 +28,7 @@ public class MysqlBasedChatMemory implements ChatMemory {
         initializeSchema();
     }
 
+
     private void initializeSchema() {
         String sql = """
             CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -39,6 +40,23 @@ public class MysqlBasedChatMemory implements ChatMemory {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """;
         jdbcTemplate.execute(sql);
+        migrateLegacyConversationIds();
+    }
+
+    /**
+     * 旧数据无用户前缀，统一归为 userId=0（无法登录对应，仅避免与登录用户串会话）
+     */
+    private void migrateLegacyConversationIds() {
+        try {
+            int n = jdbcTemplate.update(
+                    "UPDATE conversation_messages SET conversation_id = CONCAT('0|', conversation_id) WHERE conversation_id NOT LIKE '%|%'"
+            );
+            if (n > 0) {
+                log.info("已迁移 {} 条历史消息为 userId=0 前缀", n);
+            }
+        } catch (Exception e) {
+            log.warn("迁移历史 conversation_id 跳过: {}", e.getMessage());
+        }
     }
 
     @Override
@@ -106,41 +124,71 @@ public class MysqlBasedChatMemory implements ChatMemory {
     }
 
     /**
-     * 清除所有对话的历史记录
+     * 将登录前迁移产生的 {@code 0|UUID} 会话划归指定用户，使其与 {@code 用户ID|UUID} 规则一致。
+     * 可幂等执行；多人共用后端时请改为仅对您的主账号 id 执行一次（见配置 {@code app.chat.merge-zero-prefix-into-user-id}）。
      */
-    public void clearAll() {
-        String deleteSql = "DELETE FROM conversation_messages";
-        jdbcTemplate.update(deleteSql);
+    public int mergeZeroPrefixIntoUser(long userId) {
+        if (userId <= 0) {
+            return 0;
+        }
+        String prefix = userId + "|";
+        int n = jdbcTemplate.update(
+                "UPDATE conversation_messages SET conversation_id = CONCAT(?, SUBSTRING(conversation_id, 3)) WHERE conversation_id LIKE '0|%'",
+                prefix);
+        if (n > 0) {
+            log.info("已将 {} 条消息从 0| 前缀合并为 {} 前缀", n, prefix);
+        }
+        return n;
     }
 
     /**
-     * 获取所有对话的列表
-     * @return 对话列表，包含每个对话的最后一条用户消息预览
+     * 清除当前用户在库中的全部会话
      */
-    public List<Map<String, Object>> getConversationList() {
+    public void clearAllForUser(long userId) {
+        String pattern = userId + "|%";
+        jdbcTemplate.update("DELETE FROM conversation_messages WHERE conversation_id LIKE ?", pattern);
+    }
+
+    /**
+     * 获取指定用户的对话列表
+     * @return 对话列表，包含首条/最后一条用户消息预览；conversationId 为带前缀的库内主键
+     */
+    public List<Map<String, Object>> getConversationList(long userId) {
+        String pattern = userId + "|%";
+        // 使用相关子查询代替 GROUP_CONCAT(ORDER BY …)，避免部分 MySQL/MariaDB 版本或 sql_mode 下列表 SQL 失败导致侧栏一直为空
         String sql = """
             SELECT
-                conversation_id,
-                COUNT(*) as message_count,
-                MAX(message_timestamp) as last_message_timestamp,
-                MAX(created_at) as last_created_at,
-                SUBSTRING_INDEX(GROUP_CONCAT(
-                    CASE
-                        WHEN JSON_UNQUOTE(JSON_EXTRACT(message, '$.messageType')) = 'USER'
-                        THEN JSON_UNQUOTE(JSON_EXTRACT(message, '$.text'))
-                        ELSE NULL
-                    END
-                    ORDER BY message_timestamp DESC SEPARATOR '|||'
-                ), '|||', 1) as last_user_message
-            FROM conversation_messages
-            GROUP BY conversation_id
-            ORDER BY last_message_timestamp DESC
+                cm.conversation_id,
+                COUNT(*) AS message_count,
+                MAX(cm.message_timestamp) AS last_message_timestamp,
+                MAX(cm.created_at) AS last_created_at,
+                (
+                    SELECT JSON_UNQUOTE(JSON_EXTRACT(sub.message, '$.text'))
+                    FROM conversation_messages sub
+                    WHERE sub.conversation_id = cm.conversation_id
+                      AND JSON_UNQUOTE(JSON_EXTRACT(sub.message, '$.messageType')) = 'USER'
+                    ORDER BY sub.message_timestamp ASC, sub.id ASC
+                    LIMIT 1
+                ) AS first_user_message,
+                (
+                    SELECT JSON_UNQUOTE(JSON_EXTRACT(sub.message, '$.text'))
+                    FROM conversation_messages sub
+                    WHERE sub.conversation_id = cm.conversation_id
+                      AND JSON_UNQUOTE(JSON_EXTRACT(sub.message, '$.messageType')) = 'USER'
+                    ORDER BY sub.message_timestamp DESC, sub.id DESC
+                    LIMIT 1
+                ) AS last_user_message
+            FROM conversation_messages cm
+            WHERE cm.conversation_id LIKE ?
+            GROUP BY cm.conversation_id
+            ORDER BY MAX(cm.message_timestamp) DESC
             """;
 
         return jdbcTemplate.query(sql, (rs, rowNum) -> {
             Map<String, Object> result = new HashMap<>();
             result.put("conversationId", rs.getString("conversation_id"));
-            result.put("messageCount", rs.getInt("message_count"));
+            long mc = rs.getLong("message_count");
+            result.put("messageCount", mc > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) mc);
             // 使用message_timestamp字段，如果为0则使用created_at作为后备
             long messageTimestamp = rs.getLong("last_message_timestamp");
             if (messageTimestamp == 0) {
@@ -149,13 +197,18 @@ public class MysqlBasedChatMemory implements ChatMemory {
                         : System.currentTimeMillis();
             }
             result.put("lastMessageTimestamp", messageTimestamp);
+            String firstUserMessage = rs.getString("first_user_message");
+            if (firstUserMessage != null && firstUserMessage.length() > 50) {
+                firstUserMessage = firstUserMessage.substring(0, 50) + "...";
+            }
+            result.put("firstUserMessagePreview", firstUserMessage);
             String lastUserMessage = rs.getString("last_user_message");
             if (lastUserMessage != null && lastUserMessage.length() > 50) {
                 lastUserMessage = lastUserMessage.substring(0, 50) + "...";
             }
             result.put("lastUserMessagePreview", lastUserMessage);
             return result;
-        });
+        }, pattern);
     }
 
     private static class MessageRowMapper implements RowMapper<Message> {

@@ -68,7 +68,9 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 || path.startsWith("/v3/api-docs")
                 || path.startsWith("/doc.html")
                 || path.startsWith("/webjars/")
-                || path.equals("/favicon.ico");
+                || path.startsWith("/ai/download/pdf")
+                || path.equals("/favicon.ico")
+                || path.startsWith("/download/pdf");
     }
 
     private static String extractToken(HttpServletRequest request) {

@@ -18,7 +18,7 @@
 - **构建工具**: Vite
 - **UI库**: Element Plus
 - **路由**: Vue Router 4
-- **HTTP客户端**: Axios (内置SSE支持)
+- **HTTP客户端**: 浏览器原生 `fetch` + SSE
 - **样式**: 原生CSS + 响应式设计
 
 ## 项目结构

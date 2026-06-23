@@ -1,6 +1,15 @@
 import type { SSEConfig, ConversationListItem, ChatHistoryResponse, MessageDTO } from './types'
+import { authHeaders, getToken } from '@/composables/useAuth'
 
-const BASE_URL = 'http://localhost:8123/api'
+const BASE_URL = '/api'
+
+/** 与 SSE 一致：附带 access_token，避免仅依赖 Authorization 时跨域预检/浏览器策略导致鉴权失败 */
+function withAccessToken(url: string): string {
+  const token = getToken()
+  if (!token) return url
+  const q = `access_token=${encodeURIComponent(token)}`
+  return url.includes('?') ? `${url}&${q}` : `${url}?${q}`
+}
 
 export class ChatService {
   private static eventSource: EventSource | null = null
@@ -30,7 +39,11 @@ export class ChatService {
       this.eventSource.close()
     }
 
-    const url = `${config.endpoint}?userMessage=${encodeURIComponent(config.userMessage)}&chatId=${config.chatId}`
+    const token = getToken()
+    let url = `${config.endpoint}?userMessage=${encodeURIComponent(config.userMessage)}&chatId=${encodeURIComponent(config.chatId)}`
+    if (token) {
+      url += `&access_token=${encodeURIComponent(token)}`
+    }
 
     this.eventSource = new EventSource(url)
     let streamCompleted = false // 标记流是否已正常完成
@@ -52,7 +65,10 @@ export class ChatService {
           console.log('SSE stream completed normally')
         }
         streamCompleted = true
-        config.onComplete?.()
+        const done = config.onComplete?.()
+        if (done != null && typeof (done as Promise<void>).then === 'function') {
+          void (done as Promise<void>).catch((err) => console.error('SSE onComplete 失败:', err))
+        }
         this.eventSource?.close()
         this.eventSource = null
         return
@@ -112,7 +128,12 @@ export class ChatService {
    * 获取对话列表
    */
   static async getConversationList(): Promise<ConversationListItem[]> {
-    const response = await fetch(`${BASE_URL}/ai/chat/history/database/list`)
+    const response = await fetch(withAccessToken(`${BASE_URL}/ai/chat/history/database/list`), {
+      headers: { ...authHeaders() }
+    })
+    if (response.status === 401) {
+      throw new Error('UNAUTHORIZED')
+    }
     if (!response.ok) {
       throw new Error('获取对话列表失败')
     }
@@ -123,7 +144,15 @@ export class ChatService {
    * 获取指定对话的历史记录
    */
   static async getChatHistory(conversationId: string): Promise<ChatHistoryResponse> {
-    const response = await fetch(`${BASE_URL}/ai/chat/history/database?conversationId=${conversationId}`)
+    const response = await fetch(
+      withAccessToken(
+        `${BASE_URL}/ai/chat/history/database?conversationId=${encodeURIComponent(conversationId)}`
+      ),
+      { headers: { ...authHeaders() } }
+    )
+    if (response.status === 401) {
+      throw new Error('UNAUTHORIZED')
+    }
     if (!response.ok) {
       throw new Error('获取历史对话失败')
     }
@@ -134,13 +163,22 @@ export class ChatService {
    * 添加消息到历史记录
    */
   static async addMessage(conversationId: string, message: MessageDTO): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${BASE_URL}/ai/chat/history/database/add?conversationId=${conversationId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(message)
-    })
+    const response = await fetch(
+      withAccessToken(
+        `${BASE_URL}/ai/chat/history/database/add?conversationId=${encodeURIComponent(conversationId)}`
+      ),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders()
+        },
+        body: JSON.stringify(message)
+      }
+    )
+    if (response.status === 401) {
+      throw new Error('UNAUTHORIZED')
+    }
     return response.json()
   }
 
@@ -148,9 +186,18 @@ export class ChatService {
    * 清除指定对话的历史记录
    */
   static async clearChatHistory(conversationId: string): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${BASE_URL}/ai/chat/history/database?conversationId=${conversationId}`, {
-      method: 'DELETE'
-    })
+    const response = await fetch(
+      withAccessToken(
+        `${BASE_URL}/ai/chat/history/database?conversationId=${encodeURIComponent(conversationId)}`
+      ),
+      {
+        method: 'DELETE',
+        headers: { ...authHeaders() }
+      }
+    )
+    if (response.status === 401) {
+      throw new Error('UNAUTHORIZED')
+    }
     return response.json()
   }
 
@@ -158,9 +205,13 @@ export class ChatService {
    * 清除所有对话的历史记录
    */
   static async clearAllChatHistory(): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${BASE_URL}/ai/chat/history/database/clearAll`, {
-      method: 'DELETE'
+    const response = await fetch(withAccessToken(`${BASE_URL}/ai/chat/history/database/clearAll`), {
+      method: 'DELETE',
+      headers: { ...authHeaders() }
     })
+    if (response.status === 401) {
+      throw new Error('UNAUTHORIZED')
+    }
     return response.json()
   }
 }

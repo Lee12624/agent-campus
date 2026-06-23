@@ -14,7 +14,7 @@ public class ToolRegistration {
     private String searchApiKey;
 
     @Bean
-    public ToolCallback[] allTools() {
+    public ToolCallback[] allTools(AmapWeatherTool amapWeatherTool) {
         // 注册所有工具
         TerminateTool terminateTool = new TerminateTool();
         FileOperationTool fileOperationTool = new FileOperationTool();
@@ -28,7 +28,8 @@ public class ToolRegistration {
             resourceDownloadTool,
             pdfGenerationTool,
             webSearchTool,
-            terminateTool
+            terminateTool,
+            amapWeatherTool
         );
     }
 }

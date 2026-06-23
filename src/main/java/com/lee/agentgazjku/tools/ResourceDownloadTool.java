@@ -17,7 +17,10 @@ public class ResourceDownloadTool {
                                    @ToolParam(description = "Name of the file to save the downloaded resource") String fileName) {
 
         String fileDir = FileConstant.FILE_SAVE_PATH + "/download";
-        String filePath = fileDir + "/" + fileName;
+        String filePath = SafeFileName.resolveUnderDir(fileDir, fileName);
+        if (filePath == null) {
+            return "Error downloading resource: invalid file name";
+        }
 
         try {
             FileUtil.mkdir(fileDir);

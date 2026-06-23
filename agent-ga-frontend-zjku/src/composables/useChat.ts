@@ -1,22 +1,45 @@
-import { ref, nextTick } from 'vue'
+import { computed, ref } from 'vue'
 import { ChatService } from '@/api/chat'
 import type { ChatMessage, ChatHistory, ConversationListItem, MessageDTO } from '@/api/types'
+import { clearAuth } from '@/composables/useAuth'
+
+function redirectIfUnauthorized(e: unknown) {
+  if (e instanceof Error && e.message === 'UNAUTHORIZED') {
+    clearAuth()
+    window.location.href = '/login'
+    return true
+  }
+  return false
+}
+
+type ChatPhase = 'idle' | 'streaming' | 'error'
+
+/** 忽略过期的会话列表请求结果，避免 onMounted 慢请求覆盖保存后的刷新 */
+let conversationListFetchGeneration = 0
 
 export function useChat() {
   const messages = ref<ChatMessage[]>([])
-  const isTyping = ref(false)
+  const chatPhase = ref<ChatPhase>('idle')
   const currentChatId = ref<string | null>(null)
   const chatHistory = ref<ChatHistory[]>([])
   const savedMessageCount = ref(0) // 跟踪已保存的消息数量
   const isSaving = ref(false) // 防止重复保存
-  const isSending = ref(false) // 防止重复发送
+  const isTyping = computed(() => chatPhase.value === 'streaming' || isSaving.value)
+  const isSending = computed(() => chatPhase.value === 'streaming')
+
+  const createId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+    return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  }
 
   // 添加消息
   const addMessage = (role: 'user' | 'assistant', content: string): ChatMessage => {
     // 使用当前时间戳（UTC时间戳），前端格式化时会自动转换为北京时间显示
     const timestamp = Date.now()
     const message: ChatMessage = {
-      id: timestamp.toString(),
+      id: createId(),
       role,
       content,
       timestamp: timestamp
@@ -35,13 +58,12 @@ export function useChat() {
 
   // 发送消息到AI
   const sendToAI = async (message: string, isAdvancedMode: boolean) => {
-    if (!currentChatId.value || isSending.value) {
+    if (!currentChatId.value || isSending.value || isSaving.value) {
       console.error('没有有效的聊天ID或正在发送中')
       return
     }
 
-    isTyping.value = true
-    isSending.value = true
+    chatPhase.value = 'streaming'
 
     // 开发环境下的调试日志
     if (import.meta.env.DEV) {
@@ -87,23 +109,22 @@ export function useChat() {
           }
 
           // 延迟设置状态为false，以便显示错误消息
+          chatPhase.value = 'error'
           setTimeout(() => {
-            isTyping.value = false
-            isSending.value = false
+            chatPhase.value = 'idle'
           }, 500)
         },
-        onComplete: () => {
+        onComplete: async () => {
           if (import.meta.env.DEV) {
             console.log('SSE流完成，最终内容:', fullContent)
           }
 
           // 对话完成后保存消息到后端
-          saveChatHistoryToBackend()
+          await saveChatHistoryToBackend()
 
           // 延迟设置状态为false，让用户看到完整的消息
           setTimeout(() => {
-            isTyping.value = false
-            isSending.value = false
+            chatPhase.value = 'idle'
           }, 200)
         }
       }
@@ -122,16 +143,19 @@ export function useChat() {
         updateLastAIMessage(fullContent + '\n\n[提示] 由于发送过程中断，内容可能不完整。')
       }
 
-      isTyping.value = false
-      isSending.value = false
+      chatPhase.value = 'error'
+      setTimeout(() => {
+        chatPhase.value = 'idle'
+      }, 200)
     }
   }
 
   // 开始新对话
   const startNewChat = () => {
-    currentChatId.value = Date.now().toString()
+    currentChatId.value = createId()
     messages.value = []
     savedMessageCount.value = 0 // 重置已保存消息计数
+    chatPhase.value = 'idle'
     // 移除预设的欢迎消息，让欢迎界面显示
   }
 
@@ -142,7 +166,7 @@ export function useChat() {
       const historyResponse = await ChatService.getChatHistory(chatId)
 
       // 对后端返回的消息进行去重处理（基于内容和时间戳）
-      const uniqueMessages = historyResponse.messages.reduce((acc: MessageDTO[], current: MessageDTO, index: number) => {
+      const uniqueMessages = historyResponse.messages.reduce((acc: MessageDTO[], current: MessageDTO) => {
         // 检查是否已存在相同内容和时间戳的消息
         const existingIndex = acc.findIndex(msg =>
           msg.content === current.content &&
@@ -168,11 +192,11 @@ export function useChat() {
       }))
 
       savedMessageCount.value = messages.value.length // 设置已保存的消息数量
-      // 重置isTyping状态，避免加载历史记录时显示正在输入
-      isTyping.value = false
+      chatPhase.value = 'idle'
 
       console.log(`加载历史对话完成，去重后消息数量: ${messages.value.length}`)
     } catch (error) {
+      if (redirectIfUnauthorized(error)) return
       console.error('加载历史对话失败:', error)
       messages.value = []
       savedMessageCount.value = 0
@@ -183,16 +207,21 @@ export function useChat() {
   const saveChatHistoryToBackend = async () => {
     if (!currentChatId.value || isSaving.value) {
       console.log('跳过保存：无对话ID或正在保存中', { currentChatId: currentChatId.value, isSaving: isSaving.value })
+      // 无 finally：仍刷新侧栏（例如重复 [DONE] 时第二次命中 isSaving，或需与 SSE 已写入的 DB 同步）
+      try {
+        await loadChatHistory()
+      } catch (e) {
+        if (!redirectIfUnauthorized(e)) {
+          console.error('跳过保存后刷新会话列表失败:', e)
+        }
+      }
       return
     }
 
-    // 防止重复保存
     isSaving.value = true
     console.log('开始保存聊天历史到后端')
 
     try {
-      // 由于MessageChatMemoryAdvisor会自动保存消息，我们采用更保守的策略
-      // 只保存最后一条用户消息，确保它被保存（AI消息会自动保存）
       const lastUserMessage = messages.value.slice(savedMessageCount.value).find(msg => msg.role === 'user')
 
       if (lastUserMessage && lastUserMessage.content.trim() !== '') {
@@ -204,27 +233,27 @@ export function useChat() {
         }
         await ChatService.addMessage(currentChatId.value, messageDTO)
         console.log('用户消息保存完成')
+        savedMessageCount.value += 1
+        console.log(`更新已保存消息数量为: ${savedMessageCount.value}`)
       } else {
         console.log('没有新的用户消息需要保存')
       }
 
-      // 更新已保存的消息数量
-      // 注意：这里我们保守地只增加1（用户消息），AI消息应该已经通过自动机制保存了
-      if (lastUserMessage) {
-        savedMessageCount.value += 1
-        console.log(`更新已保存消息数量为: ${savedMessageCount.value}`)
-      }
-
-      // 重新加载对话列表
-      await loadChatHistory()
-
       console.log('聊天历史保存完成')
     } catch (error) {
+      if (redirectIfUnauthorized(error)) return
       console.error('保存聊天历史失败:', error)
     } finally {
-      // 无论成功还是失败，都重置保存状态
       isSaving.value = false
       console.log('保存状态已重置')
+      // 无论 addMessage 是否成功都刷新侧栏（Advisor 可能已写入 DB；并避免仅依赖 try 内刷新）
+      try {
+        await loadChatHistory()
+      } catch (e) {
+        if (!redirectIfUnauthorized(e)) {
+          console.error('保存后刷新会话列表失败:', e)
+        }
+      }
     }
   }
 
@@ -233,14 +262,26 @@ export function useChat() {
 
   // 加载聊天历史列表
   const loadChatHistory = async () => {
+    const gen = ++conversationListFetchGeneration
     try {
       const conversationList = await ChatService.getConversationList()
-      chatHistory.value = conversationList.map((item: ConversationListItem) => ({
-        id: item.conversationId,
-        title: item.lastUserMessagePreview || '新对话',
-        timestamp: item.lastMessageTimestamp
-      }))
+      if (gen !== conversationListFetchGeneration) {
+        return
+      }
+      chatHistory.value = conversationList.map((item: ConversationListItem) => {
+        const first =
+          (item.firstUserMessagePreview && String(item.firstUserMessagePreview).trim()) || ''
+        const last =
+          (item.lastUserMessagePreview && String(item.lastUserMessagePreview).trim()) || ''
+        return {
+          id: item.conversationId,
+          title: last || first || '新对话',
+          firstPreview: first,
+          timestamp: item.lastMessageTimestamp
+        }
+      })
     } catch (error) {
+      if (redirectIfUnauthorized(error)) return
       console.error('加载聊天历史列表失败:', error)
       chatHistory.value = []
     }
@@ -259,6 +300,7 @@ export function useChat() {
         savedMessageCount.value = 0
       }
     } catch (error) {
+      if (redirectIfUnauthorized(error)) return
       console.error('删除历史记录失败:', error)
     }
   }
@@ -281,6 +323,7 @@ export function useChat() {
         throw new Error(result.message || '清除历史记录失败')
       }
     } catch (error) {
+      if (redirectIfUnauthorized(error)) return
       console.error('清除所有历史记录失败:', error)
       // 即使清除失败，也尝试重新加载历史记录以确保状态同步
       await loadChatHistory()
@@ -347,13 +390,13 @@ export function useChat() {
           timeZone: 'Asia/Shanghai'
         })}`
       } else if (diffDays < 7) {
-        // 一周内 - 显示北京时间
-        const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-        return `${weekdays[date.getUTCDay()]} ${date.toLocaleTimeString('zh-CN', {
+        // 一周内：星期与时间均按 Asia/Shanghai，避免 getUTCDay 与本地时区混用导致错一天
+        return new Intl.DateTimeFormat('zh-CN', {
+          weekday: 'short',
           hour: '2-digit',
           minute: '2-digit',
           timeZone: 'Asia/Shanghai'
-        })}`
+        }).format(date)
       } else {
         // 更早 - 显示北京时间
         return date.toLocaleDateString('zh-CN', {
@@ -376,11 +419,6 @@ export function useChat() {
     }
   }
 
-  // 格式化消息内容
-  const formatMessage = (content: string): string => {
-    return content.replace(/\n/g, '<br>')
-  }
-
   return {
     messages,
     isTyping,
@@ -396,7 +434,6 @@ export function useChat() {
     loadChatHistory,
     deleteChatHistory,
     clearAllChatHistory,
-    formatTime,
-    formatMessage
+    formatTime
   }
 }

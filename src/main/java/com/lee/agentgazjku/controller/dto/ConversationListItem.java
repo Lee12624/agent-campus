@@ -17,6 +17,11 @@ public class ConversationListItem {
     private String conversationId;
 
     /**
+     * 首条用户消息的预览（前50个字符），用于会话列表小字等（与豆包等「首问」展示一致）
+     */
+    private String firstUserMessagePreview;
+
+    /**
      * 最后一条用户消息的预览（前50个字符）
      */
     private String lastUserMessagePreview;
@@ -31,6 +36,7 @@ public class ConversationListItem {
      */
     private Integer messageCount;
 }
+
 
 
 
