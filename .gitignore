@@ -1,5 +1,10 @@
 ### Custom ###
 application-local.yml
+.env
+*.env
+
+### Build artifacts ###
+1/
 
 ### Frontend ###
 agent-ga-frontend-zjku/node_modules/

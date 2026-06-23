@@ -3,7 +3,6 @@ package com.lee.agentgazjku.app;
 
 
 import com.lee.agentgazjku.advisor.MyLoggerAdvisor;
-import com.lee.agentgazjku.chatmemory.MysqlBasedChatMemory;
 import com.lee.agentgazjku.rag.QueryRewriter;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -15,7 +14,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
@@ -33,16 +32,21 @@ public class CampusApp {
             "主动引导深入：当用户问题模糊时，通过提问逐步明确需求（例如：你是遇到选课冲突了吗？还是不确定选哪门课呀？）；" +
             "提供具体建议：结合校园场景给出可操作的步骤，避免笼统回答（例如：如果想申请奖学金，可以先根据学生手册查看资格，然后找相应人员咨询哦）；" +
             "关注情感需求：当用户表现出焦虑、迷茫时，先共情再解答（例如：我明白期末复习压力很大，咱们可以一起梳理下复习计划～）。";
+    private static final String ADVANCED_TOOL_PROMPT = SYSTEM_PROMPT + """
+            你处于高级模式，可以使用工具完成任务。
+            工具使用规则：
+            1) 当用户问题涉及实时信息、最新新闻、外部网页、当前政策、当前天气、近期活动、互联网检索时，必须优先调用联网搜索工具 `searchWeb`。
+            2) 先工具、后回答：先获取工具结果，再基于结果给出结论；不要在未调用工具时假装已联网查询。
+            3) 若工具返回为空或报错，要明确说明并给出下一步建议，不要编造结果。
+            4) 校园内部固定知识可结合已有知识回答；若用户明确要求“查一下最新信息”，必须调用 `searchWeb`。
+            """;
 
     /**
      * 构造函数，初始化校园学姐应用
      *
      * @param dashscopeChatModel 用于处理对话的模型 dashscopeChatModel
      */
-    public CampusApp(ChatModel dashscopeChatModel, JdbcTemplate jdbcTemplate) {
-
-        // 初始化基于mysql的对话记忆实例，用于维护对话历史  （JdbcTemplate jdbcTemplate）
-        ChatMemory mysqlBasedChatMemory = new MysqlBasedChatMemory(jdbcTemplate);
+    public CampusApp(ChatModel dashscopeChatModel, @Qualifier("mysqlChatMemory") ChatMemory mysqlBasedChatMemory) {
 
 
         // 构建 ChatClient，设置默认系统提示和记忆顾问
@@ -165,6 +169,7 @@ public class CampusApp {
     public String doChatWithTool (String userMessage, String chatId) {
         ChatResponse chatResponse  = chatClient
                 .prompt()
+                .system(ADVANCED_TOOL_PROMPT)
                 .user(userMessage)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .advisors(new MyLoggerAdvisor())
@@ -190,6 +195,7 @@ public class CampusApp {
 
         return chatClient
                 .prompt()
+                .system(ADVANCED_TOOL_PROMPT)
                 .user(userMessage)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, chatId))
                 .advisors(new MyLoggerAdvisor())

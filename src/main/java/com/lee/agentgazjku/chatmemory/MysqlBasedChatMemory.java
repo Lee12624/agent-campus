@@ -2,6 +2,7 @@ package com.lee.agentgazjku.chatmemory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -16,9 +17,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 public class MysqlBasedChatMemory implements ChatMemory {
 
     private final JdbcTemplate jdbcTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public MysqlBasedChatMemory(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
@@ -40,7 +43,7 @@ public class MysqlBasedChatMemory implements ChatMemory {
 
     @Override
     public List<Message> get(String conversationId) {
-        String sql = "SELECT message, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC";
+        String sql = "SELECT message FROM conversation_messages WHERE conversation_id = ? ORDER BY message_timestamp ASC, id ASC";
         return jdbcTemplate.query(sql, new MessageRowMapper(), conversationId);
     }
 
@@ -54,31 +57,37 @@ public class MysqlBasedChatMemory implements ChatMemory {
      */
     public void addWithTimestamp(String conversationId, Message message, long timestamp) {
         try {
-            ObjectMapper mapper = new ObjectMapper();
-
             // 构造一个简化的 JSON 结构用于存储
             Map<String, Object> simplifiedMessage = new HashMap<>();
             simplifiedMessage.put("text", message.getText());
             simplifiedMessage.put("messageType", message.getClass().getSimpleName().replace("Message", "").toUpperCase());
 
-            String jsonMessage = mapper.writeValueAsString(simplifiedMessage);
+            String jsonMessage = objectMapper.writeValueAsString(simplifiedMessage);
 
-            // 改进的去重检查：基于对话ID、消息内容、消息类型和时间戳范围（允许5秒内的重复）
-            String checkSql = "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ? AND JSON_EXTRACT(message, '$.text') = ? AND JSON_EXTRACT(message, '$.messageType') = ? AND ABS(message_timestamp - ?) <= 5000";
+            // 改进的去重检查：基于对话ID、消息内容、消息类型和时间戳范围（允许5秒内重复判定）
+            // 注意：JSON_EXTRACT 返回 JSON 值，比较前需 JSON_UNQUOTE。
+            String checkSql = """
+                    SELECT COUNT(*) FROM conversation_messages
+                    WHERE conversation_id = ?
+                    AND JSON_UNQUOTE(JSON_EXTRACT(message, '$.text')) = ?
+                    AND JSON_UNQUOTE(JSON_EXTRACT(message, '$.messageType')) = ?
+                    AND ABS(message_timestamp - ?) <= 5000
+                    """;
             String messageText = message.getText();
             String messageType = message.getClass().getSimpleName().replace("Message", "").toUpperCase();
             Integer count = jdbcTemplate.queryForObject(checkSql, Integer.class, conversationId, messageText, messageType, timestamp);
 
             if (count != null && count > 0) {
                 // 消息已存在，跳过插入
-                System.out.println("跳过重复消息: " + conversationId + " - " + messageType + " - 时间戳: " + timestamp + " - " + messageText.substring(0, Math.min(50, messageText.length())));
+                String preview = messageText == null ? "" : messageText.substring(0, Math.min(50, messageText.length()));
+                log.info("跳过重复消息: {} - {} - 时间戳: {} - {}", conversationId, messageType, timestamp, preview);
                 return;
             }
 
             // 插入新消息，包含时间戳
             String insertSql = "INSERT INTO conversation_messages (conversation_id, message, message_timestamp) VALUES (?, ?, ?)";
             int rowsAffected = jdbcTemplate.update(insertSql, conversationId, jsonMessage, timestamp);
-            System.out.println("插入新消息: " + conversationId + " - " + messageType + " - 时间戳: " + timestamp + " - 影响行数: " + rowsAffected);
+            log.debug("插入新消息: {} - {} - 时间戳: {} - 影响行数: {}", conversationId, messageType, timestamp, rowsAffected);
         } catch (Exception e) {
             throw new RuntimeException("Error serializing message to JSON", e);
         }
@@ -114,10 +123,11 @@ public class MysqlBasedChatMemory implements ChatMemory {
                 conversation_id,
                 COUNT(*) as message_count,
                 MAX(message_timestamp) as last_message_timestamp,
+                MAX(created_at) as last_created_at,
                 SUBSTRING_INDEX(GROUP_CONCAT(
                     CASE
-                        WHEN JSON_EXTRACT(message, '$.messageType') = 'USER'
-                        THEN JSON_EXTRACT(message, '$.text')
+                        WHEN JSON_UNQUOTE(JSON_EXTRACT(message, '$.messageType')) = 'USER'
+                        THEN JSON_UNQUOTE(JSON_EXTRACT(message, '$.text'))
                         ELSE NULL
                     END
                     ORDER BY message_timestamp DESC SEPARATOR '|||'
@@ -134,7 +144,9 @@ public class MysqlBasedChatMemory implements ChatMemory {
             // 使用message_timestamp字段，如果为0则使用created_at作为后备
             long messageTimestamp = rs.getLong("last_message_timestamp");
             if (messageTimestamp == 0) {
-                messageTimestamp = rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : System.currentTimeMillis();
+                messageTimestamp = rs.getTimestamp("last_created_at") != null
+                        ? rs.getTimestamp("last_created_at").getTime()
+                        : System.currentTimeMillis();
             }
             result.put("lastMessageTimestamp", messageTimestamp);
             String lastUserMessage = rs.getString("last_user_message");
@@ -147,12 +159,13 @@ public class MysqlBasedChatMemory implements ChatMemory {
     }
 
     private static class MessageRowMapper implements RowMapper<Message> {
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+
         @Override
         public Message mapRow(ResultSet rs, int rowNum) throws SQLException {
             String json = rs.getString("message");
-            ObjectMapper objectMapper = new ObjectMapper();
             try {
-                JsonNode node = objectMapper.readTree(json);
+                JsonNode node = MAPPER.readTree(json);
 
                 // 从 JSON 中提取文本内容和消息类型
                 String content = node.path("text").asText();

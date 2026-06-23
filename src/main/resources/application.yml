@@ -1,13 +1,29 @@
 # spring
 spring:
+  profiles:
+    active: local
   application:
     name: agent-ga-zjku
   datasource:
-    url: jdbc:mysql://localhost:3306/tmp?useSSL=false&serverTimezone=UTC
+    url: jdbc:mysql://localhost:3306/tmp?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
     username: our-username
     password: your-password
     driver-class-name: com.mysql.cj.jdbc.Driver
-
+    # 解决文件、输出、控制台乱码
+    banner:
+      charset: UTF-8
+    messages:
+      encoding: UTF-8
+    http:
+      encoding:
+        enabled: true
+        charset: UTF-8
+        force: true
+# 日志乱码
+logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
   # 环境配置
   profiles:
     active: local
@@ -44,7 +60,7 @@ springdoc:
   group-configs:
     - group: 'default'
       paths-to-match: '/**'
-      packages-to-scan: com.lee.leeaiagent.controller
+      packages-to-scan: com.lee.agentgazjku.controller
 # knife4j
 knife4j:
   enable: true
@@ -53,3 +69,20 @@ knife4j:
 
 search-api:
   api-key: your-search-api-key
+
+# 高德地图API配置
+amap:
+  weather-api-key: your-amap-weather-api-key
+  weather-url: https://restapi.amap.com/v3/weather/weatherInfo
+
+# 简易登录（JWT）；生产环境务必修改 jwt-secret
+app:
+  auth:
+    jwt-secret: "please-change-this-to-a-long-random-string-at-least-32-chars"
+    jwt-expire-seconds: 604800
+  # 会话曾以 0|UUID 存在库中，登录后列表只查「当前用户ID|*」，会导致侧栏空白。
+  # 设为首个账号的 users.id（一般第一个注册为 1），启动时把 0| 合并为该用户前缀；多人共用后端请改为 0 并自行 SQL 迁移。
+  chat:
+    merge-zero-prefix-into-user-id: 1
+  # 服务器地址配置（用于生成下载链接）
+  server-address: http://localhost:8123
